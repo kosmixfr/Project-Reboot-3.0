@@ -1363,7 +1363,7 @@ void AFortGameModeAthena::Athena_HandleStartingNewPlayerHook(AFortGameModeAthena
 			if (!bShouldDestroyVendingMachines)
 			{
 				if (Globals::bFillVendingMachines)
-					FillVendingMachines();
+					FillVendingMachines(GameState);
 			}
 			else
 			{
@@ -1423,8 +1423,15 @@ void AFortGameModeAthena::Athena_HandleStartingNewPlayerHook(AFortGameModeAthena
 			auto SpawnIsland_FloorLoot = FindObject<UClass>(L"/Game/Athena/Environments/Blueprints/Tiered_Athena_FloorLoot_Warmup.Tiered_Athena_FloorLoot_Warmup_C");
 			auto BRIsland_FloorLoot = FindObject<UClass>(L"/Game/Athena/Environments/Blueprints/Tiered_Athena_FloorLoot_01.Tiered_Athena_FloorLoot_01_C");
 
-			TArray<AActor*> SpawnIsland_FloorLoot_Actors = UGameplayStatics::GetAllActorsOfClass(GetWorld(), SpawnIsland_FloorLoot);
-			TArray<AActor*> BRIsland_FloorLoot_Actors = UGameplayStatics::GetAllActorsOfClass(GetWorld(), BRIsland_FloorLoot);
+			TArray<AActor*> SpawnIsland_FloorLoot_Actors{};
+			TArray<AActor*> BRIsland_FloorLoot_Actors{};
+
+			// Tiered_Athena_FloorLoot_Warmup does not exist on old versions (e.g. 3.5):
+			// GetAllActorsOfClass with a null class crashes (AV 0x148).
+			if (SpawnIsland_FloorLoot)
+				SpawnIsland_FloorLoot_Actors = UGameplayStatics::GetAllActorsOfClass(GetWorld(), SpawnIsland_FloorLoot);
+			if (BRIsland_FloorLoot)
+				BRIsland_FloorLoot_Actors = UGameplayStatics::GetAllActorsOfClass(GetWorld(), BRIsland_FloorLoot);
 
 			LOG_INFO(LogDev, "Spawning floor loot ({} warmup, {} island)!", SpawnIsland_FloorLoot_Actors.Num(), BRIsland_FloorLoot_Actors.Num());
 

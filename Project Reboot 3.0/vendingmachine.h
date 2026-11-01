@@ -53,13 +53,11 @@ struct FCollectorUnitInfo
 	}
 };
 
-static inline UCurveTable* GetGameData()
+static inline UCurveTable* GetGameData(AFortGameStateAthena* GameState)
 {
-	auto GameState = Cast<AFortGameStateAthena>(GetWorld()->GetGameState());
-
 	UCurveTable* FortGameData = nullptr;
 
-	auto CurrentPlaylist = GameState->GetCurrentPlaylist();
+	auto CurrentPlaylist = GameState ? GameState->GetCurrentPlaylist() : nullptr;
 
 	if (CurrentPlaylist)
 	{
@@ -73,18 +71,15 @@ static inline UCurveTable* GetGameData()
 	return FortGameData;
 }
 
-static inline void FillItemCollector(ABuildingItemCollectorActor* ItemCollector, FName& LootTierGroup, bool bUseInstanceLootValueOverrides, int LootTier, int recursive = 0)
+static inline void FillItemCollector(ABuildingItemCollectorActor* ItemCollector, FName& LootTierGroup, bool bUseInstanceLootValueOverrides, int LootTier, AFortGameStateAthena* GameState, int recursive = 0)
 {
 	if (recursive >= 10)
 		return;
 
-	auto GameModeAthena = (AFortGameModeAthena*)GetWorld()->GetGameMode();
-	auto GameState = Cast<AFortGameStateAthena>(GameModeAthena->GetGameState());
-
 	static auto ItemCollectionsOffset = ItemCollector->GetOffset("ItemCollections");
 	auto& ItemCollections = ItemCollector->Get<TArray<FCollectorUnitInfo>>(ItemCollectionsOffset);
 
-	UCurveTable* FortGameData = GetGameData();
+	UCurveTable* FortGameData = GetGameData(GameState);
 
 	auto WoodName = UKismetStringLibrary::Conv_StringToName(L"Default.VendingMachine.Cost.Wood");
 	auto StoneName = UKismetStringLibrary::Conv_StringToName(L"Default.VendingMachine.Cost.Stone");
@@ -239,7 +234,7 @@ static inline void FillItemCollector(ABuildingItemCollectorActor* ItemCollector,
 	}
 }
 
-static inline void FillVendingMachines()
+static inline void FillVendingMachines(AFortGameStateAthena* GameState)
 {
 	auto VendingMachineClass = FindObject<UClass>("/Game/Athena/Items/Gameplay/VendingMachine/B_Athena_VendingMachine.B_Athena_VendingMachine_C");
 	auto AllVendingMachines = UGameplayStatics::GetAllActorsOfClass(GetWorld(), VendingMachineClass);
@@ -250,7 +245,14 @@ static inline void FillVendingMachines()
 
 	auto RarityWeightsName = UKismetStringLibrary::Conv_StringToName(L"Default.VendingMachine.RarityWeights");
 
-	auto FortGameData = GetGameData();
+	auto FortGameData = GetGameData(GameState);
+
+	if (!FortGameData)
+	{
+		LOG_WARN(LogGame, "FillVendingMachines: no GameData curve table, skipping.");
+		AllVendingMachines.Free();
+		return;
+	}
 
 	float WeightSum = 0;
 
@@ -300,7 +302,7 @@ static inline void FillVendingMachines()
 
 		*/
 
-		FillItemCollector(VendingMachine, OverrideLootTierGroup, true, Out - 1);
+		FillItemCollector(VendingMachine, OverrideLootTierGroup, true, Out - 1, GameState);
 	}
 
 	auto AllVendingMachinesNum = AllVendingMachines.Num();
