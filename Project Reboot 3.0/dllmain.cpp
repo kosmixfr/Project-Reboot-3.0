@@ -1059,6 +1059,153 @@ DWORD WINAPI Main(LPVOID)
 
     Hooking::MinHook::Hook((PVOID)Addresses::KickPlayer, (PVOID)AGameSession::KickPlayerHook, (PVOID*)&AGameSession::KickPlayerOriginal);
 
+    {
+        // Bypass "PreLogin failure: Client failed to send unique id" (cracked clients send no UniqueId).
+        // PreLogin is a plain native virtual (no UFunction), so locate its impl by finding the
+        // function referencing the unique-id error string, cross-checked against the GameMode vtable.
+        auto ImageBase = __int64(GetModuleHandleW(0));
+        __int64 ImageSize = 0;
+        __int64 TextStart = 0;
+        DWORD TextSize = 0;
+        {
+            auto Dos = (PIMAGE_DOS_HEADER)ImageBase;
+            auto Nt = (PIMAGE_NT_HEADERS64)(ImageBase + Dos->e_lfanew);
+            ImageSize = Nt->OptionalHeader.SizeOfImage;
+            auto Sec = IMAGE_FIRST_SECTION(Nt);
+            for (int i = 0; i < Nt->FileHeader.NumberOfSections; i++, Sec++)
+            {
+                if (memcmp(Sec->Name, ".text", 5) == 0)
+                {
+                    TextStart = ImageBase + Sec->VirtualAddress;
+                    TextSize = Sec->Misc.VirtualSize;
+                    break;
+                }
+            }
+        }
+
+        const wchar_t* Needle = L"Client failed to send unique id";
+        int NeedleBytes = (int)(wcslen(Needle) * sizeof(wchar_t));
+        __int64 StrAddr = 0;
+
+        for (__int64 p = ImageBase; p < ImageBase + ImageSize - NeedleBytes; p++)
+        {
+            if (*(wchar_t*)p == Needle[0] && memcmp((void*)p, Needle, NeedleBytes) == 0)
+            {
+                StrAddr = p;
+                break;
+            }
+        }
+
+        LOG_INFO(LogDev, "PreLogin errstr: 0x{:x}", StrAddr ? StrAddr - ImageBase : 0);
+
+        __int64 PreLoginAddr = 0;
+        __int64 PreLoginSite = 0;
+
+        if (StrAddr && GameModeDefault && TextStart)
+        {
+            std::vector<__int64> Vft;
+            for (int i = 0; i < 512; i++)
+            {
+                __int64 e = __int64(GameModeDefault->VFTable[i]);
+                if (e > ImageBase && e < ImageBase + ImageSize)
+                    Vft.push_back(e);
+            }
+
+            for (__int64 p = TextStart; p < TextStart + TextSize - 7 && !PreLoginAddr; p++)
+            {
+                uint8_t b0 = *(uint8_t*)p;
+                uint8_t b1 = *(uint8_t*)(p + 1);
+                uint8_t b2 = *(uint8_t*)(p + 2);
+
+                // REX.W LEA reg, [rip+disp32]
+                if ((b0 == 0x48 || b0 == 0x4C) && b1 == 0x8D && (b2 & 0xC7) == 0x05)
+                {
+                    int disp = *(int32_t*)(p + 3);
+                    if (p + 7 + disp == StrAddr)
+                    {
+                        for (__int64 q = p; q > p - 0x10000; q--)
+                        {
+                            uint8_t c0 = *(uint8_t*)q;
+                            uint8_t c1 = *(uint8_t*)(q + 1);
+                            uint8_t c2 = *(uint8_t*)(q + 2);
+                            bool bPrologue =
+                                (c0 == 0x40 && (c1 == 0x55 || c1 == 0x53 || c1 == 0x56 || c1 == 0x57)) ||
+                                (c0 == 0x48 && c1 == 0x89 && c2 == 0x5C) ||
+                                (c0 == 0x48 && c1 == 0x83 && c2 == 0xEC) ||
+                                (c0 == 0x48 && c1 == 0x8B && c2 == 0xC4) ||
+                                (c0 == 0x4C && c1 == 0x89 && c2 == 0x44);
+
+                            if (bPrologue)
+                            {
+                                for (auto e : Vft)
+                                {
+                                    if (e == q)
+                                    {
+                                        PreLoginAddr = q;
+                                        PreLoginSite = p;
+                                        break;
+                                    }
+                                }
+                                if (PreLoginAddr)
+                                    break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (PreLoginAddr)
+        {
+            LOG_INFO(LogDev, "PreLogin impl: 0x{:x} (site 0x{:x})", PreLoginAddr - ImageBase, PreLoginSite - ImageBase);
+            AGameSession::PreLoginImplAddr = PreLoginAddr;
+
+            bool bMinHookOk = Hooking::MinHook::Hook((PVOID)PreLoginAddr, (PVOID)AGameSession::PreLoginHook, (PVOID*)&AGameSession::PreLoginOriginal);
+            LOG_INFO(LogDev, "PreLogin MinHook: {}", bMinHookOk);
+
+            // Find the vtable slot so we can swap it directly (guarantees interception
+            // of the virtual dispatch even if the inline hook failed).
+            int PreLoginIdx = -1;
+            void* PreLoginSlotBefore = nullptr;
+            if (GameModeDefault)
+            {
+                for (int i = 0; i < 512; i++)
+                {
+                    if (__int64(GameModeDefault->VFTable[i]) == PreLoginAddr)
+                    {
+                        PreLoginIdx = i;
+                        PreLoginSlotBefore = GameModeDefault->VFTable[i];
+                        break;
+                    }
+                }
+            }
+
+            bool bSwapped = false;
+            if (PreLoginIdx != -1)
+            {
+                if (!AGameSession::PreLoginOriginal)
+                    AGameSession::PreLoginOriginal = (decltype(AGameSession::PreLoginOriginal))PreLoginSlotBefore;
+                VirtualSwap(GameModeDefault->VFTable, PreLoginIdx, (void*)AGameSession::PreLoginHook);
+                bSwapped = GameModeDefault->VFTable[PreLoginIdx] == (void*)AGameSession::PreLoginHook;
+            }
+            LOG_INFO(LogDev, "PreLogin vtable idx: {} swapped: {}", PreLoginIdx, bSwapped);
+
+            std::ofstream marker("PreLoginHook.txt");
+            marker << std::format("impl=0x{:x} site=0x{:x} minhook={} vftidx={} swapped={} orig=0x{:x} exebase=0x{:x} firstbytes=",
+                PreLoginAddr - ImageBase, PreLoginSite - ImageBase, bMinHookOk, PreLoginIdx, bSwapped,
+                __int64(PreLoginSlotBefore) - ImageBase, ImageBase);
+            for (int i = 0; i < 16; i++)
+                marker << std::format("{:02x}", *(uint8_t*)(PreLoginAddr + i));
+            marker << '\n';
+        }
+        else
+        {
+            LOG_WARN(LogDev, "PreLogin impl not found, unique-id bypass not installed!");
+            std::ofstream marker("PreLoginHook.txt");
+            marker << "PreLoginHook NOT installed";
+        }
+    }
+
     LOG_INFO(LogDev, "Size: 0x{:x}", sizeof(TMap<FName, void*>));
 
     Hooking::MinHook::Hook((PVOID)Addresses::ActorGetNetMode, (PVOID)GetNetModeHook2, nullptr);
