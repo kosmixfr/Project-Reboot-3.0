@@ -157,52 +157,31 @@ public:
 #else
 // #define USE_VIRTUALALLOC_SPAWNPARAMS
 
+// Thread-local storage: fixes the 0x8c9 dangling-pointer crash (the old code
+// returned the address of a stack local) without VirtualAlloc leaks. The
+// engine copies spawn parameters synchronously inside SpawnActor, so sharing
+// one slot per thread is safe; all 16 existing call sites can keep passing
+// the returned pointer directly with no free needed.
 static inline void* CreateSpawnParameters(ESpawnActorCollisionHandlingMethod SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::Undefined, bool bDeferConstruction = false, UObject* Owner = nullptr)
 {
 	if (Engine_Version >= 500)
 	{
-#ifdef USE_VIRTUALALLOC_SPAWNPARAMS
-		auto addr = (FActorSpawnParametersUE500*)VirtualAlloc(0, sizeof(FActorSpawnParametersUE500), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-
-		if (!addr)
-			return nullptr;
-
-		addr->Owner = Owner;
-		addr->bDeferConstruction = bDeferConstruction;
-		addr->SpawnCollisionHandlingOverride = SpawnCollisionHandlingOverride;
-		return addr;
-#else
-		FActorSpawnParametersUE500 addr{};
-
-		addr.Owner = Owner;
-		addr.bDeferConstruction = bDeferConstruction;
-		addr.SpawnCollisionHandlingOverride = SpawnCollisionHandlingOverride;
-		return &addr;
-#endif
+		thread_local FActorSpawnParametersUE500 Params{};
+		Params = FActorSpawnParametersUE500{};
+		Params.Owner = Owner;
+		Params.bDeferConstruction = bDeferConstruction;
+		Params.SpawnCollisionHandlingOverride = SpawnCollisionHandlingOverride;
+		return &Params;
 	}
 	else
 	{
-#ifdef USE_VIRTUALALLOC_SPAWNPARAMS
-		auto addr = (FActorSpawnParameters*)VirtualAlloc(0, sizeof(FActorSpawnParameters), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-
-		if (!addr)
-			return nullptr;
-
-		addr->Owner = Owner;
-		addr->bDeferConstruction = bDeferConstruction;
-		addr->SpawnCollisionHandlingOverride = SpawnCollisionHandlingOverride;
-		return addr;
-#else
-		FActorSpawnParameters addr{};
-
-		addr.Owner = Owner;
-		addr.bDeferConstruction = bDeferConstruction;
-		addr.SpawnCollisionHandlingOverride = SpawnCollisionHandlingOverride;
-		return &addr;
-#endif
+		thread_local FActorSpawnParameters Params{};
+		Params = FActorSpawnParameters{};
+		Params.Owner = Owner;
+		Params.bDeferConstruction = bDeferConstruction;
+		Params.SpawnCollisionHandlingOverride = SpawnCollisionHandlingOverride;
+		return &Params;
 	}
-
-	return nullptr;
 }
 
 class UWorld : public UObject, public FNetworkNotify
@@ -250,23 +229,12 @@ public:
 	template <typename ActorType>
 	ActorType* SpawnActor(UClass* Class, FTransform UserTransformPtr = FTransform(), void* SpawnParameters = nullptr)
 	{
-		const bool bCreatedSpawnParameters = !SpawnParameters;
-
-		if (bCreatedSpawnParameters)
-		{
+		// CreateSpawnParameters uses thread-local storage: valid for the
+		// duration of this call, no alloc/free needed from any caller.
+		if (!SpawnParameters)
 			SpawnParameters = CreateSpawnParameters();
-		}
 
-		auto actor = (ActorType*)SpawnActorOriginal(this, Class, &UserTransformPtr, SpawnParameters);
-
-		// if (bCreatedSpawnParameters)
-		{
-#ifdef USE_VIRTUALALLOC_SPAWNPARAMS
-			VirtualFree(SpawnParameters, 0, MEM_RELEASE);
-#endif
-		}
-
-		return actor;
+		return (ActorType*)SpawnActorOriginal(this, Class, &UserTransformPtr, SpawnParameters);
 	}
 
 	template <typename ActorType>
@@ -280,11 +248,7 @@ public:
 		UserTransformPtr.Rotation = Rotation;
 		UserTransformPtr.Scale3D = Scale3D;
 
-		auto actor = SpawnActor<ActorType>(Class, UserTransformPtr, SpawnParameters);
-
-		VirtualFree(SpawnParameters, 0, MEM_RELEASE);
-
-		return actor;
+		return SpawnActor<ActorType>(Class, UserTransformPtr, SpawnParameters);
 	}
 
 	AWorldSettings* GetWorldSettings(bool bCheckStreamingPersistent = false, bool bChecked = true) const;

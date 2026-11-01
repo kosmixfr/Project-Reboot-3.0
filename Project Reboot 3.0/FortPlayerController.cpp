@@ -1010,9 +1010,10 @@ AActor* AFortPlayerController::SpawnToyInstanceHook(UObject* Context, FFrame* St
 	if (!ToyClass)
 		return nullptr;
 
-	auto Params = CreateSpawnParameters(ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn, false, PlayerController);
-	auto NewToy = GetWorld()->SpawnActor<AActor>(ToyClass, SpawnPosition, Params);
-	// free(Params); // ?
+	// CreateSpawnParameters uses thread-local storage (no dangling pointer,
+	// no free needed) — SpawnActor consumes it synchronously.
+	auto NewToy = GetWorld()->SpawnActor<AActor>(ToyClass, SpawnPosition,
+		CreateSpawnParameters(ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn, false, PlayerController));
 
 	static auto ActiveToyInstancesOffset = PlayerController->GetOffset("ActiveToyInstances");
 	auto& ActiveToyInstances = PlayerController->Get<TArray<AActor*>>(ActiveToyInstancesOffset);

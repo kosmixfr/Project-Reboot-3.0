@@ -4,12 +4,14 @@
 #include <fstream>
 #include <format>
 #include <vector>
+
 #include "GameSession.h"
 
 #include "reboot.h"
 #include "Actor.h"
 #include "NetConnection.h"
 #include "FortPlayerControllerAthena.h"
+#include "FortGameStateAthena.h"
 #include "GameplayStatics.h"
 #include "KismetMathLibrary.h"
 #include <random>
@@ -46,58 +48,161 @@ void UNetDriver::RemoveNetworkActor(AActor* Actor)
 	// RenamedStartupActors.Remove(Actor->GetFName());
 }
 
-void UNetDriver::TickFlushHook(UNetDriver* NetDriver)
+// Lazy PreLogin bypass: swap the slot on the LIVE GameMode's vtable, whatever
+// native class it is (BR/Athena/Frontend all have their own vtable copy).
+// Vtable-swap only (no inline hook): Original stays the untouched impl.
+// POD-only helper (no C++ objects needing unwinding).
+static void TryInstallPreLoginSwap(UNetDriver* NetDriver)
 {
-#if 0 // DISABLED during bisect: suspected STACK_OVERFLOW during map travel teardown.
-	// Lazy PreLogin bypass: swap the slot on the LIVE GameMode's vtable, whatever
-	// native class it is (BR/Athena/Frontend all have their own vtable copy).
-	if (AGameSession::PreLoginImplAddr)
+	if (!AGameSession::PreLoginImplAddr)
+		return;
+
+	static void* SwappedPreLoginTables[64] = {};
+	static int SwappedPreLoginCount = 0;
+
+	// NOTE: do NOT use the viewport world here: the host removes its local
+	// player, so the viewport world is gone. Use the ticking driver's world.
+	UWorld* World = NetDriver ? NetDriver->GetNetDriverWorld() : nullptr;
+
+	if (!World)
+		World = GetWorld();
+
+	if (!World)
+		return;
+
+	UObject* GM = (UObject*)World->GetGameMode();
+
+	if (!GM || !GM->VFTable)
+		return;
+
+	// Diagnostic trace (rare: once per unseen GameMode table).
 	{
-		static std::vector<void**> SwappedPreLoginTables;
-
-		auto World = GetWorld();
-
-		if (World)
+		static int TraceCount = 0;
+		if (TraceCount < 8)
 		{
-			UObject* GM = (UObject*)World->GetGameMode();
+			TraceCount++;
+			std::ofstream marker("PreLoginHook.txt", std::ios::app);
+			marker << std::format("tr world=0x{:x} gm=0x{:x} vft=0x{:x} impl=0x{:x} idx={}\n",
+				__int64(World), __int64(GM), __int64(GM->VFTable),
+				AGameSession::PreLoginImplAddr, AGameSession::PreLoginIdx);
+		}
+	}
 
-			if (GM && GM->VFTable)
+	void** vft = GM->VFTable;
+	bool bKnown = false;
+	for (int k = 0; k < SwappedPreLoginCount; k++)
+	{
+		if (SwappedPreLoginTables[k] == vft)
+		{
+			bKnown = true;
+			break;
+		}
+	}
+
+	if (bKnown)
+		return;
+
+	if (SwappedPreLoginCount < 64)
+		SwappedPreLoginTables[SwappedPreLoginCount++] = vft;
+
+	// Base-class vtable slot indices are stable across subclasses, so the
+	// PreLogin slot index found on the default GameMode also covers live
+	// GameModes that OVERRIDE PreLogin (their slot holds the override, not
+	// the base impl). Prefer an exact address match; fall back to the index.
+	bool bSwapped = false;
+	for (int i = 0; i < 512; i++)
+	{
+		if (__int64(vft[i]) == AGameSession::PreLoginImplAddr)
+		{
+			if (!AGameSession::PreLoginOriginal)
+				AGameSession::PreLoginOriginal = (decltype(AGameSession::PreLoginOriginal))vft[i];
+
+			DWORD dwP;
+			if (VirtualProtect(&vft[i], 8, PAGE_EXECUTE_READWRITE, &dwP))
 			{
-				void** vft = GM->VFTable;
-				bool bKnown = false;
-				for (auto t : SwappedPreLoginTables)
-				{
-					if (t == vft)
-					{
-						bKnown = true;
-						break;
-					}
-				}
+				vft[i] = (void*)AGameSession::PreLoginHook;
+				DWORD dwT;
+				VirtualProtect(&vft[i], 8, dwP, &dwT);
+				bSwapped = true;
+			}
+			break;
+		}
+	}
 
-				if (!bKnown)
-				{
-					SwappedPreLoginTables.push_back(vft);
+	if (!bSwapped && AGameSession::PreLoginIdx >= 0 && AGameSession::PreLoginIdx < 512)
+	{
+		void* Slot = vft[AGameSession::PreLoginIdx];
+		bool bProtectOk = false;
 
-					for (int i = 0; i < 1024; i++)
-					{
-						if (__int64(vft[i]) == AGameSession::PreLoginImplAddr)
-						{
-							DWORD dwP;
-							VirtualProtect(&vft[i], 8, PAGE_EXECUTE_READWRITE, &dwP);
-							vft[i] = (void*)AGameSession::PreLoginHook;
-							DWORD dwT;
-							VirtualProtect(&vft[i], 8, dwP, &dwT);
+		if (Slot && Slot != (void*)AGameSession::PreLoginHook)
+		{
+			DWORD dwP;
+			if (VirtualProtect(&vft[AGameSession::PreLoginIdx], 8, PAGE_EXECUTE_READWRITE, &dwP))
+			{
+				bProtectOk = true;
+				vft[AGameSession::PreLoginIdx] = (void*)AGameSession::PreLoginHook;
+				DWORD dwT;
+				VirtualProtect(&vft[AGameSession::PreLoginIdx], 8, dwP, &dwT);
+				bSwapped = true;
+			}
+		}
 
-							std::ofstream marker("PreLoginHook.txt", std::ios::app);
-							marker << std::format("lazy swapped idx={} gm={}\n", i, GM->GetName());
-							break;
-						}
-					}
-				}
+		{
+			static int IdxTraceCount = 0;
+			if (IdxTraceCount < 4)
+			{
+				IdxTraceCount++;
+				std::ofstream marker("PreLoginHook.txt", std::ios::app);
+				marker << std::format("idxfall slot=0x{:x} hook=0x{:x} protect={} swapped={}\n",
+					__int64(Slot), __int64((void*)AGameSession::PreLoginHook), bProtectOk, bSwapped);
 			}
 		}
 	}
-#endif
+
+	{
+		static int SwapTraceCount = 0;
+		if (SwapTraceCount < 8)
+		{
+			SwapTraceCount++;
+			std::ofstream marker("PreLoginHook.txt", std::ios::app);
+			marker << std::format("swapped={} vft=0x{:x}\n", bSwapped, __int64(vft));
+		}
+	}
+}
+
+void UNetDriver::TickFlushHook(UNetDriver* NetDriver)
+{
+	TryInstallPreLoginSwap(NetDriver);
+
+	// Periodic match-state probe (temporary diagnostics for 3.5 listen).
+	{
+		static unsigned long long LastProbeMs = 0;
+		unsigned long long NowMs = GetTickCount64();
+
+		if (NowMs - LastProbeMs > 30000)
+		{
+			LastProbeMs = NowMs;
+
+			UWorld* World = NetDriver ? NetDriver->GetNetDriverWorld() : nullptr;
+			AActor* GM = World ? (AActor*)World->GetGameMode() : nullptr;
+			AActor* GS = World ? (AActor*)World->GetGameState() : nullptr;
+			int NumConns = NetDriver ? NetDriver->GetClientConnections().Num() : -1;
+			int PlayersLeft = -1;
+			int GamePhase = -1;
+			int GamePhaseStep = -1;
+
+			if (GS && GS->IsA(AFortGameStateAthena::StaticClass()))
+			{
+				auto AthenaGS = (AFortGameStateAthena*)GS;
+				PlayersLeft = AthenaGS->GetPlayersLeft();
+				GamePhase = (int)AthenaGS->GetGamePhase();
+				GamePhaseStep = (int)AthenaGS->GetGamePhaseStep();
+			}
+
+			LOG_INFO(LogDev, "Probe conns={} gm=0x{:x} gs=0x{:x} playersLeft={} phase={} phaseStep={}",
+				NumConns, __int64(GM), __int64(GS), PlayersLeft, GamePhase, GamePhaseStep);
+		}
+	}
 
 	if (bShouldDestroyAllPlayerBuilds) // i hate this
 	{

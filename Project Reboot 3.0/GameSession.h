@@ -1,12 +1,12 @@
 #pragma once
 
+#include <Windows.h>
 #include "Controller.h"
 #include "UnrealString.h"
 #include "OnlineReplStructs.h"
 #include "log.h"
 
 #include <fstream>
-#include <intrin.h>
 
 class AGameModeBase;
 
@@ -19,23 +19,39 @@ public:
 
 	static inline void (*PreLoginOriginal)(AGameModeBase*, const FString&, const FString&, const FUniqueNetIdRepl&, FString&) = nullptr;
 	static inline __int64 PreLoginImplAddr = 0;
+	static inline int PreLoginIdx = -1;
 
-	// Accept local listen-server logins even when the client sends no UniqueId
-	// (cracked builds + Cobalt: "PreLogin failure: Client failed to send unique id").
-	// DIAGNOSTIC VERSION: logs raw args + caller, then passes through to the original.
-	static void PreLoginHook(AGameModeBase* GM, const FString& A2, const FString& A3, const FUniqueNetIdRepl& A4, FString& A5, void* A6 = nullptr, void* A7 = nullptr)
+	// Accept listen-server logins that carry no UniqueId (loopback/host client:
+	// "PreLogin failure: Client failed to send unique id"). The resulting
+	// rejection aborts our match and tears down the server, so treat them
+	// like splitscreen guests instead of rejecting.
+	static void PreLoginHook(AGameModeBase* GM, const FString& Options, const FString& Address, const FUniqueNetIdRepl& UniqueId, FString& ErrorMessage)
 	{
-		std::ofstream marker("PreLoginHook.txt", std::ios::app);
-		marker << "hit gm=" << std::format("0x{:x}", __int64(GM))
-			<< " ret=" << std::format("0x{:x}", __int64(_ReturnAddress()))
-			<< " a2=" << std::format("0x{:x}", __int64(&A2))
-			<< " a3=" << std::format("0x{:x}", __int64(&A3))
-			<< " a4=" << std::format("0x{:x}", __int64(&A4))
-			<< " a5=" << std::format("0x{:x}", __int64(&A5))
-			<< " a5data=" << std::format("0x{:x}", __int64(A5.Data.Data))
-			<< std::endl;
+		{ std::ofstream T("PreLoginHook.txt", std::ios::app); T << "HIT PreLoginHook\n"; }
+
+		// Empty ReplicationBytes = no id sent. Fail-safe: unknown layout
+		// (offset <= 0) passes through to the original.
+		static int ReplBytesOffset = -2;
+
+		if (ReplBytesOffset == -2)
+			ReplBytesOffset = FindOffsetStruct("/Script/Engine.UniqueNetIdRepl", "ReplicationBytes", false);
+
+		{ std::ofstream T("PreLoginHook.txt", std::ios::app); T << "ReplBytesOffset=" << ReplBytesOffset << "\n"; }
+
+		if (ReplBytesOffset > 0)
+		{
+			auto& Bytes = *(const TArray<uint8>*)(__int64(&UniqueId) + ReplBytesOffset);
+
+			{ std::ofstream T("PreLoginHook.txt", std::ios::app); T << "Bytes.Num=" << Bytes.Num() << " Data=" << std::format("0x{:x}", __int64(Bytes.Data)) << "\n"; }
+
+			if (Bytes.Num() <= 0 || Bytes.Data == nullptr)
+			{
+				{ std::ofstream FireMarker("PreLoginHook.txt", std::ios::app); FireMarker << "ACCEPTED empty-id login\n"; }
+				return; // leave ErrorMessage empty = accept
+			}
+		}
 
 		if (PreLoginOriginal)
-			PreLoginOriginal(GM, A2, A3, A4, A5);
+			PreLoginOriginal(GM, Options, Address, UniqueId, ErrorMessage);
 	}
 };

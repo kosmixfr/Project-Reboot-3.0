@@ -1063,6 +1063,8 @@ DWORD WINAPI Main(LPVOID)
         // Bypass "PreLogin failure: Client failed to send unique id" (cracked clients send no UniqueId).
         // PreLogin is a plain native virtual (no UFunction), so locate its impl by finding the
         // function referencing the unique-id error string, cross-checked against the GameMode vtable.
+        // NOTE: Shipping builds devirtualize the PreLogin call, so the vtable swap below is a
+        // fallback; the MinHook inline hook is what actually intercepts it.
         auto ImageBase = __int64(GetModuleHandleW(0));
         __int64 ImageSize = 0;
         __int64 TextStart = 0;
@@ -1118,7 +1120,7 @@ DWORD WINAPI Main(LPVOID)
                 uint8_t b2 = *(uint8_t*)(p + 2);
 
                 // REX.W LEA reg, [rip+disp32]
-                if ((b0 == 0x48 || b0 == 0x4C) && b1 == 0x8D && (b2 & 0xC7) == 0x05)
+                if (((b0 == 0x48 || b0 == 0x4C) && b1 == 0x8D && (b2 & 0xC7) == 0x05))
                 {
                     int disp = *(int32_t*)(p + 3);
                     if (p + 7 + disp == StrAddr)
@@ -1128,6 +1130,7 @@ DWORD WINAPI Main(LPVOID)
                             uint8_t c0 = *(uint8_t*)q;
                             uint8_t c1 = *(uint8_t*)(q + 1);
                             uint8_t c2 = *(uint8_t*)(q + 2);
+
                             bool bPrologue =
                                 (c0 == 0x40 && (c1 == 0x55 || c1 == 0x53 || c1 == 0x56 || c1 == 0x57)) ||
                                 (c0 == 0x48 && c1 == 0x89 && c2 == 0x5C) ||
@@ -1160,11 +1163,15 @@ DWORD WINAPI Main(LPVOID)
             LOG_INFO(LogDev, "PreLogin impl: 0x{:x} (site 0x{:x})", PreLoginAddr - ImageBase, PreLoginSite - ImageBase);
             AGameSession::PreLoginImplAddr = PreLoginAddr;
 
+            // Inline hook FIRST: Shipping builds devirtualize the PreLogin
+            // call, so vtable swaps alone never intercept it. MinHook hands
+            // us a trampoline as Original (no recursion: the vtable swaps
+            // below keep it via the !PreLoginOriginal guard).
             bool bMinHookOk = Hooking::MinHook::Hook((PVOID)PreLoginAddr, (PVOID)AGameSession::PreLoginHook, (PVOID*)&AGameSession::PreLoginOriginal);
             LOG_INFO(LogDev, "PreLogin MinHook: {}", bMinHookOk);
 
-            // Find the vtable slot so we can swap it directly (guarantees interception
-            // of the virtual dispatch even if the inline hook failed).
+            // Swap the slot on the default GameMode vtable now; any other live
+            // GameMode vtables are swapped lazily in TickFlushHook.
             int PreLoginIdx = -1;
             void* PreLoginSlotBefore = nullptr;
             if (GameModeDefault)
@@ -1183,6 +1190,7 @@ DWORD WINAPI Main(LPVOID)
             bool bSwapped = false;
             if (PreLoginIdx != -1)
             {
+                AGameSession::PreLoginIdx = PreLoginIdx;
                 if (!AGameSession::PreLoginOriginal)
                     AGameSession::PreLoginOriginal = (decltype(AGameSession::PreLoginOriginal))PreLoginSlotBefore;
                 VirtualSwap(GameModeDefault->VFTable, PreLoginIdx, (void*)AGameSession::PreLoginHook);
@@ -1191,12 +1199,9 @@ DWORD WINAPI Main(LPVOID)
             LOG_INFO(LogDev, "PreLogin vtable idx: {} swapped: {}", PreLoginIdx, bSwapped);
 
             std::ofstream marker("PreLoginHook.txt");
-            marker << std::format("impl=0x{:x} site=0x{:x} minhook={} vftidx={} swapped={} orig=0x{:x} exebase=0x{:x} firstbytes=",
+            marker << std::format("impl=0x{:x} site=0x{:x} minhook={} vftidx={} swapped={} orig=0x{:x} exebase=0x{:x}\n",
                 PreLoginAddr - ImageBase, PreLoginSite - ImageBase, bMinHookOk, PreLoginIdx, bSwapped,
                 __int64(PreLoginSlotBefore) - ImageBase, ImageBase);
-            for (int i = 0; i < 16; i++)
-                marker << std::format("{:02x}", *(uint8_t*)(PreLoginAddr + i));
-            marker << '\n';
         }
         else
         {

@@ -3,6 +3,7 @@
 #include "FortAthenaSupplyDrop.h"
 #include "FortGameModeAthena.h"
 #include "Vector2D.h"
+#include "World.h"
 
 FVector2D GenerateRandomVector2D(float Radius)
 {
@@ -45,10 +46,25 @@ void AFortAthenaMapInfo::SpawnLlamas()
 
 	LOG_INFO(LogDev, "Attempting to spawn {} llamas.", AmountOfLlamasToSpawn);
 
+	// The global GetWorld() follows GameViewport->World, which is null on our
+	// listen server (local player removed). Use our own Outer chain instead:
+	// MapInfo -> ULevel -> UWorld.
+	UWorld* ActorWorld = nullptr;
+	if (UObject* Level = this->GetOuter())
+		ActorWorld = (UWorld*)Level->GetOuter();
+
+	LOG_INFO(LogDev, "SpawnLlamas worlds: viewport=0x{:x} actor=0x{:x}", __int64(GetWorld()), __int64(ActorWorld));
+
+	if (!ActorWorld)
+		return;
+
 	for (int i = 0; i < AmountOfLlamasToSpawn; i++)
 	{
+		LOG_INFO(LogDev, "Llama iter {}: PickSupplyDropLocation...", i);
 		int Radius = 100000;
 		FVector Location = PickSupplyDropLocation(FVector(1, 1, 10000), Radius);
+
+		LOG_INFO(LogDev, "Llama iter {}: loc {} {} {}", i, Location.X, Location.Y, Location.Z);
 
 		// LOG_INFO(LogDev, "Initial Llama at {} {} {}", Location.X, Location.Y, Location.Z);
 
@@ -63,8 +79,13 @@ void AFortAthenaMapInfo::SpawnLlamas()
 		InitialSpawnTransform.Rotation = RandomYawRotator.Quaternion();
 		InitialSpawnTransform.Scale3D = FVector(1, 1, 1);
 
-		auto LlamaStart = GetWorld()->SpawnActor<AFortAthenaSupplyDrop>(GetLlamaClass(), InitialSpawnTransform, 
+		auto LlamaClass = GetLlamaClass();
+		LOG_INFO(LogDev, "Llama iter {}: class 0x{:x}", i, __int64(LlamaClass));
+
+		auto LlamaStart = ActorWorld->SpawnActor<AFortAthenaSupplyDrop>(LlamaClass, InitialSpawnTransform, 
 			CreateSpawnParameters(ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn, true));
+	
+		LOG_INFO(LogDev, "Llama iter {}: spawned 0x{:x}", i, __int64(LlamaStart));
 	
 		// LOG_INFO(LogDev, "LlamaStart: {}", __int64(LlamaStart));
 
@@ -72,6 +93,7 @@ void AFortAthenaMapInfo::SpawnLlamas()
 			continue;
 		
 		auto GroundLocation = LlamaStart->FindGroundLocationAt(InitialSpawnTransform.Translation);
+		LOG_INFO(LogDev, "Llama iter {}: ground {} {} {}", i, GroundLocation.X, GroundLocation.Y, GroundLocation.Z);
 
 		FTransform FinalSpawnTransform = InitialSpawnTransform;
 		FinalSpawnTransform.Translation = GroundLocation;

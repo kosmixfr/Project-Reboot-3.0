@@ -61,8 +61,9 @@ static inline UCurveTable* GetGameData(AFortGameStateAthena* GameState)
 
 	if (CurrentPlaylist)
 	{
-		static auto GameDataOffset = CurrentPlaylist->GetOffset("GameData");
-		FortGameData = CurrentPlaylist ? CurrentPlaylist->GetPtr<TSoftObjectPtr<UCurveTable>>(GameDataOffset)->Get() : nullptr;
+		static auto GameDataOffset = CurrentPlaylist->GetOffset("GameData", false);
+		if (GameDataOffset != -1)
+			FortGameData = CurrentPlaylist->GetPtr<TSoftObjectPtr<UCurveTable>>(GameDataOffset)->Get();
 	}
 
 	if (!FortGameData)
@@ -237,6 +238,13 @@ static inline void FillItemCollector(ABuildingItemCollectorActor* ItemCollector,
 static inline void FillVendingMachines(AFortGameStateAthena* GameState)
 {
 	auto VendingMachineClass = FindObject<UClass>("/Game/Athena/Items/Gameplay/VendingMachine/B_Athena_VendingMachine.B_Athena_VendingMachine_C");
+
+	if (!VendingMachineClass)
+	{
+		LOG_WARN(LogGame, "FillVendingMachines: no vending machine class, skipping.");
+		return;
+	}
+
 	auto AllVendingMachines = UGameplayStatics::GetAllActorsOfClass(GetWorld(), VendingMachineClass);
 
 	auto OverrideLootTierGroup = UKismetStringLibrary::Conv_StringToName(L"Loot_AthenaVending"); // ItemCollector->GetLootTierGroupOverride();

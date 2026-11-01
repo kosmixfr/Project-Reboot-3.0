@@ -37,6 +37,7 @@
 #include <random>
 #include "TSubclassOf.h"
 #include "FortAthenaSupplyDrop.h"
+#include <fstream>
 
 static UFortPlaylistAthena* GetPlaylistToUse()
 {
@@ -1071,6 +1072,18 @@ bool AFortGameModeAthena::Athena_ReadyToStartMatchHook(AFortGameModeAthena* Game
 	if (!Ret)
 		Ret = Athena_ReadyToStartMatchOriginal(GameMode);
 
+	{
+		static bool bFirstRTSM = true;
+		static bool LastRTSMRet = false;
+
+		if (bFirstRTSM || Ret != LastRTSMRet)
+		{
+			bFirstRTSM = false;
+			LastRTSMRet = Ret;
+			LOG_INFO(LogDev, "ReadyToStartMatch polled: ret={}", Ret);
+		}
+	}
+
 	if (Ret)
 	{
 		LOG_INFO(LogDev, "Athena_ReadyToStartMatchOriginal RET!"); // if u dont see this, not good
@@ -1244,10 +1257,18 @@ int AFortGameModeAthena::Athena_PickTeamHook(AFortGameModeAthena* GameMode, uint
 
 void AFortGameModeAthena::Athena_HandleStartingNewPlayerHook(AFortGameModeAthena* GameMode, AActor* NewPlayerActor)
 {
+	{ std::ofstream JoinTrace("JoinTrace.txt", std::ios::app); JoinTrace << "enter\n"; }
+
+	if (!GameMode || !NewPlayerActor)
+		return;
+
 	if (NewPlayerActor == GetLocalPlayerController()) // we dont really need this but it also functions as a nullptr check usually
 		return;
 
 	auto GameState = GameMode->GetGameStateAthena();
+
+	if (!GameState)
+		return Athena_HandleStartingNewPlayerOriginal(GameMode, NewPlayerActor);
 
 	static auto CurrentPlaylistDataOffset = GameState->GetOffset("CurrentPlaylistData", false);
 	auto CurrentPlaylist = CurrentPlaylistDataOffset == -1 && Fortnite_Version < 6 ? nullptr : GameState->GetCurrentPlaylist();
@@ -1258,7 +1279,9 @@ void AFortGameModeAthena::Athena_HandleStartingNewPlayerHook(AFortGameModeAthena
 	{
 		static int LastNum123 = 15;
 
-		if (GetWorld()->GetNetDriver()->GetClientConnections().Num() >= NumRequiredPlayersToStart && LastNum123 != Globals::AmountOfListens)
+		auto NetDriver = GetWorld()->GetNetDriver();
+
+		if (NetDriver && NetDriver->GetClientConnections().Num() >= NumRequiredPlayersToStart && LastNum123 != Globals::AmountOfListens)
 		{
 			LastNum123 = Globals::AmountOfListens;
 
@@ -1446,6 +1469,9 @@ void AFortGameModeAthena::Athena_HandleStartingNewPlayerHook(AFortGameModeAthena
 			for (int i = 0; i < SpawnIsland_FloorLoot_Actors.Num(); ++i)
 			{
 				ABuildingContainer* CurrentActor = (ABuildingContainer*)SpawnIsland_FloorLoot_Actors.at(i);
+
+			if (!CurrentActor)
+				continue;
 				auto Location = CurrentActor->GetActorLocation() + CurrentActor->GetActorForwardVector() * CurrentActor->GetLootSpawnLocation_Athena().X + CurrentActor->GetActorRightVector() * CurrentActor->GetLootSpawnLocation_Athena().Y + CurrentActor->GetActorUpVector() * CurrentActor->GetLootSpawnLocation_Athena().Z;
 
 				std::vector<LootDrop> LootDrops = PickLootDrops(SpawnIslandTierGroup, GameState->GetWorldLevel(), -1, bPrintWarmup);
@@ -1474,6 +1500,9 @@ void AFortGameModeAthena::Athena_HandleStartingNewPlayerHook(AFortGameModeAthena
 			for (int i = 0; i < BRIsland_FloorLoot_Actors.Num(); ++i)
 			{
 				ABuildingContainer* CurrentActor = (ABuildingContainer*)BRIsland_FloorLoot_Actors.at(i);
+
+			if (!CurrentActor)
+				continue;
 				spawned++;
 
 				// LOG_INFO(LogDev, "Test: {}", CurrentActor->GetSearchLootTierGroup().ToString());
@@ -1620,7 +1649,9 @@ void AFortGameModeAthena::Athena_HandleStartingNewPlayerHook(AFortGameModeAthena
 	auto PlayerAbilitySet = GetPlayerAbilitySet();
 	auto AbilitySystemComponent = PlayerStateAthena->GetAbilitySystemComponent();
 
-	if (PlayerAbilitySet && Fortnite_Version != 12.00)
+	{ std::ofstream JoinTrace("JoinTrace.txt", std::ios::app); JoinTrace << "pre-asc\n"; }
+
+	if (PlayerAbilitySet && AbilitySystemComponent && Fortnite_Version != 12.00)
 	{
 		PlayerAbilitySet->GiveToAbilitySystem(AbilitySystemComponent);
 
@@ -1767,6 +1798,8 @@ void AFortGameModeAthena::Athena_HandleStartingNewPlayerHook(AFortGameModeAthena
 	}
 
 	LOG_INFO(LogDev, "HandleStartingNewPlayer end");
+
+	{ std::ofstream JoinTrace("JoinTrace.txt", std::ios::app); JoinTrace << "end\n"; }
 
 	if (Engine_Version <= 420)
 	{
