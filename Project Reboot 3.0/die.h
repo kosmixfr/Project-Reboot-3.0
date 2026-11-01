@@ -12,6 +12,15 @@ static inline void ProcessEventHook(UObject* Object, UFunction* Function, void* 
 	if (!Object || !Function)
 		return;
 
+	// Guard against re-entrancy: GetName()/GetFullName() below call
+	// FName::ToString(), which itself fires ProcessEvent (hooked).
+	// Without this, logging recurses forever -> EXCEPTION_STACK_OVERFLOW.
+	static thread_local bool bInProcessEventHook = false;
+	if (bInProcessEventHook)
+		return Object->ProcessEvent(Function, Parameters);
+
+	bInProcessEventHook = true;
+
 	if (Globals::bLogProcessEvent)
 	{
 		auto FunctionName = Function->GetName(); // UKismetSystemLibrary::GetPathName(Function).ToString();
@@ -159,6 +168,8 @@ static inline void ProcessEventHook(UObject* Object, UFunction* Function, void* 
 			LOG_INFO(LogDev, "Function called: {} with {}", FunctionFullName, ObjectName);
 		}
 	}
+
+	bInProcessEventHook = false;
 
 	return Object->ProcessEvent(Function, Parameters);
 }

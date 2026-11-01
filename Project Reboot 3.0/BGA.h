@@ -14,8 +14,20 @@ static inline void SpawnBGAs() // hahah not "proper", there's a function that we
 	if (!BGAConsumableSpawnerClass)
 		return;
 
-	auto GameState = Cast<AFortGameStateAthena>(GetWorld()->GetGameState());
+	auto World = GetWorld();
+
+	if (!World)
+		return;
+
+	auto GameState = Cast<AFortGameStateAthena>(World->GetGameState());
+
+	if (!GameState)
+		return;
+
 	auto MapInfo = GameState->GetMapInfo();
+
+	if (!MapInfo)
+		return;
 
 	auto AllBGAConsumableSpawners = UGameplayStatics::GetAllActorsOfClass(GetWorld(), BGAConsumableSpawnerClass);
 

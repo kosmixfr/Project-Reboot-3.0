@@ -1,5 +1,11 @@
 #include "NetDriver.h"
 
+#include <Windows.h>
+#include <fstream>
+#include <format>
+#include <vector>
+#include "GameSession.h"
+
 #include "reboot.h"
 #include "Actor.h"
 #include "NetConnection.h"
@@ -42,6 +48,57 @@ void UNetDriver::RemoveNetworkActor(AActor* Actor)
 
 void UNetDriver::TickFlushHook(UNetDriver* NetDriver)
 {
+#if 0 // DISABLED during bisect: suspected STACK_OVERFLOW during map travel teardown.
+	// Lazy PreLogin bypass: swap the slot on the LIVE GameMode's vtable, whatever
+	// native class it is (BR/Athena/Frontend all have their own vtable copy).
+	if (AGameSession::PreLoginImplAddr)
+	{
+		static std::vector<void**> SwappedPreLoginTables;
+
+		auto World = GetWorld();
+
+		if (World)
+		{
+			UObject* GM = (UObject*)World->GetGameMode();
+
+			if (GM && GM->VFTable)
+			{
+				void** vft = GM->VFTable;
+				bool bKnown = false;
+				for (auto t : SwappedPreLoginTables)
+				{
+					if (t == vft)
+					{
+						bKnown = true;
+						break;
+					}
+				}
+
+				if (!bKnown)
+				{
+					SwappedPreLoginTables.push_back(vft);
+
+					for (int i = 0; i < 1024; i++)
+					{
+						if (__int64(vft[i]) == AGameSession::PreLoginImplAddr)
+						{
+							DWORD dwP;
+							VirtualProtect(&vft[i], 8, PAGE_EXECUTE_READWRITE, &dwP);
+							vft[i] = (void*)AGameSession::PreLoginHook;
+							DWORD dwT;
+							VirtualProtect(&vft[i], 8, dwP, &dwT);
+
+							std::ofstream marker("PreLoginHook.txt", std::ios::app);
+							marker << std::format("lazy swapped idx={} gm={}\n", i, GM->GetName());
+							break;
+						}
+					}
+				}
+			}
+		}
+	}
+#endif
+
 	if (bShouldDestroyAllPlayerBuilds) // i hate this
 	{
 		auto AllBuildingSMActors = UGameplayStatics::GetAllActorsOfClass(GetWorld(), ABuildingSMActor::StaticClass());
